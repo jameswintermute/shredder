@@ -1,188 +1,172 @@
 # Shredder — NAS External Backup Disk Cleaner
 
-**Version:** v1.0.1 — 2025-11-11  
+**Version:** v1.0.3 — 2025-11-11  
 **Author:** James Wintermute  
-**License:** GNU GPLv3  
+**License:** GNU GPLv3 (https://www.gnu.org/licenses/gpl-3.0.html)  
 **Warranty:** This program comes with ABSOLUTELY NO WARRANTY.
 
 ---
 
 ## 🧩 Overview
 
-**Shredder** is a lightweight shell utility for securely erasing external USB backup drives attached to a Synology NAS.  
-It is designed for **BusyBox-based DSM systems** and runs directly from a directory such as:
+Shredder is a command-line utility designed for **Synology NAS environments (BusyBox-based)** to securely clean **external USB backup disks** between backup cycles.  
+It supports both safe, non-destructive filesystem wipes and full-device forensic shreds.
 
+Typical installation path:
 ```
 /volume1/shredder
 ```
 
-Run as the **root user** to allow direct access to block devices.
-
-Shredder offers two secure cleaning modes:
-
-1. **Filesystem-preserving wipe (default)** — securely overwrites all file data and free space, but keeps the partition table and filesystem structure.  
-2. **Full-device shred (forensic)** — overwrites the entire disk, destroying the filesystem and partition table completely.
+Run as **root** for full access to external devices.
 
 ---
 
-## ⚠️ WARNING — DATA DESTRUCTION TOOL
+## ⚙️ Features
 
-Both modes are **irreversible**. Once a wipe or shred is started, **all data on the selected disk will be permanently destroyed**.
-
-> **Use extreme care.**  
-> Verify that you have complete, validated backups before proceeding.  
-> Always double-check which `/dev/sdX` device you are selecting.
-
-This program comes with **ABSOLUTELY NO WARRANTY.**  
-See the included GNU GPLv3 license for details.
+- Interactive **menu-driven launcher**
+- **Filesystem-preserving wipe** (default): securely overwrites all file data and free space while preserving the partition table
+- **Full device shred** (forensic mode): completely overwrites the disk including partition table (requires re-partitioning)
+- **Live 60s throughput benchmark** via `estimate.sh`
+- Automatic **dependency check** on startup
+- Logs every action with timestamps and results under `/logs`
+- Keeps a persistent **history CSV** for SIEM or audit ingestion
 
 ---
 
-## 📂 Project Layout
+## 🧮 Estimate Feature (v1.0.3)
+
+The **Estimate** option now runs a real 60-second write test to determine actual sustained write speed.
+
+### How it works
+- Writes temporary 100 MiB chunks to the selected mount for ~60 s.
+- Measures true MB/s throughput.
+- Deletes the temporary test file afterward.
+- Uses the result to estimate how long a **2-pass + zero** shred would take.
+
+If the benchmark cannot run, it falls back to **120 MB/s** assumed speed.
+
+### Typical output
+```
+Running live 60s speed test on /volumeUSB1/usbshare ...
+Measured rate: 97 MB/s
+Estimated shred time (2-pass + zero): ~11h 40m
+Planning window: between 9h and 13h
+```
+
+---
+
+## 🧰 Directory Structure
 
 ```
-shredder/
+/volume1/shredder/
 ├── bin/
-│   ├── shredder.sh          # main interactive menu
-│   ├── check-deps.sh        # dependency checker
-│   └── start-shredding.sh   # launcher (recommended entry point)
-├── logs/
-│   ├── history.csv          # shred history (SIEM-friendly)
-│   └── shred-*.log          # individual shred/wipe logs
-├── state/
-│   └── current.*            # runtime state tracking
+│   ├── check-deps.sh        # Dependency checker
+│   ├── estimate.sh          # 60s live speed test
+│   └── shredder.sh          # Main interactive menu
+├── logs/                    # Execution logs and CSV history
+├── state/                   # PID and session tracking
+├── start-shredding.sh       # Root launcher
 ├── LICENSE
 └── README.md
 ```
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Launching
 
-1. Copy the project to your NAS (e.g. `/volume1/shredder`).
-2. SSH into your NAS and switch to root:
-
-   ```bash
-   sudo -i
-   cd /volume1/shredder
-   chmod +x bin/*.sh
-   ```
-
-3. Launch Shredder safely using:
-
-   ```bash
-   ./bin/start-shredding.sh
-   ```
-
-4. From the menu, choose:
-   - **1** — List detected external USB disks  
-   - **2** — Start a new wipe/shred  
-   - **3** — Check current progress  
-   - **4** — View shred history  
-   - **5** — Check dependencies  
-   - **0** — Exit
-
----
-
-## 🧠 Modes Explained
-
-### 1️⃣ Filesystem-Preserving Wipe (Default)
-
-- Deletes all files and fills remaining free space with random data, then zeroes it.  
-- **Preserves** the filesystem and partition table.  
-- Ideal for **rotating backup disks** where you want the drive ready for reuse immediately after wiping.
-
-**Command example:**
+From any path:
 ```bash
-rm -rf /volumeUSB1/usbshare/*
-dd if=/dev/urandom of=/volumeUSB1/usbshare/fill bs=1M
-rm fill
-dd if=/dev/zero of=/volumeUSB1/usbshare/fill bs=1M
-rm fill
+sudo /volume1/shredder/start-shredding.sh
 ```
 
-✅ Safe  
-✅ Fast  
-⚠️ Slight metadata remnants may remain (inode table, journal) — not suitable for forensic-level cleaning.
+The launcher automatically:
+- Resolves its own directory (even when run from `/root` or cron)
+- Performs dependency check
+- Starts the main interactive menu
 
 ---
 
-### 2️⃣ Full-Device Shred (Forensic)
+## 🧭 Menu Options
 
-- Unmounts the drive and overwrites the **entire device** (e.g. `/dev/sdq`).  
-- Destroys all partitions, metadata, and filesystem information.  
-- After completion, the drive must be re-partitioned or formatted before reuse.
-
-**Command example:**
-```bash
-shred -v -n 2 -z /dev/sdq
+```
+1) Check external USB disks
+2) Start a new wipe/shred
+3) Check current progress
+4) Show history
+5) Check dependencies
+6) Shred estimate — calculate approx. time
+0) Exit
 ```
 
-✅ Forensic-grade  
-⚠️ Requires reformatting after completion
+---
+
+## ⚠️ Risk & Safety
+
+**This tool permanently destroys data.**
+
+- Always double-check device paths (e.g., `/dev/sdq1`) before confirming.
+- The default mode ("Filesystem-preserving wipe") **keeps the partition table** and is safe for reusing disks in a rotation.
+- The full-device mode **erases everything**, including partition and filesystem structure — use with extreme care.
+- It is strongly recommended to **unmount** the target volume manually or let Shredder do it when prompted.
 
 ---
 
-## 🧩 Launcher Script
+## 🧾 Logs & History
 
-The launcher (`start-shredding.sh`) provides:
-- A **warning banner** before use
-- An automatic **dependency check**
-- Launch of the main interactive menu (`shredder.sh`)
-- Clear version/date banner (`v1.0.1 — 2025-11-11`)
-
-This avoids confusion with other NAS tools like *Hasher* and prevents accidental data destruction.
-
----
-
-## 📊 Logging & SIEM Integration
-
-All activity is logged in:
-
+All actions are recorded to:
 ```
 /volume1/shredder/logs/
 ```
 
-- `shred-*.log` or `fswipe-*.log` — full output of each run
-- `history.csv` — append-only record with:
-  ```
-  timestamp,device,mode,passes,result,bytes,start_ts,end_ts,logfile
-  ```
+A CSV summary (`history.csv`) maintains an audit-friendly record:
+```
+timestamp,device,mode,passes,result,bytes,start_ts,end_ts,logfile
+```
 
-Example entry:
-```
-2025-11-11T14:05:30+00:00,/dev/sdq,fs-wipe,0,success,0,1731330300,1731330600,/volume1/shredder/logs/fswipe-20251111-1405-sdq.log
-```
+This data can be ingested into SIEM or forensic log systems for traceability.
 
 ---
 
-## 🔒 Safety Features
+## 🧩 Dependencies
 
-- Refuses to shred suspected system disks (`/dev/sda`, `/dev/sdb`, `/dev/md*`, etc.)
-- Requires explicit `YES` confirmation before destructive operations
-- Supports one active shred/wipe at a time
-- Logs everything with timestamps for forensic traceability
-- Preserves last operation state for recovery
+Shredder relies on standard BusyBox or NAS utilities:
+- `dd`
+- `shred`
+- `umount`
+- `blockdev`
+- `sync`
+- `ps`
+- `mount`
 
----
-
-## 🧰 Dependency Check
-
-You can verify required commands with:
-
+Check these automatically with:
 ```bash
-./bin/check-deps.sh
+sudo sh /volume1/shredder/bin/check-deps.sh
 ```
-
-Typical dependencies:
-- `shred`, `mount`, `umount`, `awk`, `sed`, `date`, `ps`, `dd`, `sync`
 
 ---
 
-## 🪪 License
+## ✅ Example Workflow
 
-Copyright (C) 2025 James Wintermute  
-Licensed under **GNU GPLv3**  
-<https://www.gnu.org/licenses/>
+1. Plug in an external USB backup disk.
+2. Run:
+   ```bash
+   sudo /volume1/shredder/start-shredding.sh
+   ```
+3. Choose option 1 to verify your USB disk is detected.
+4. Choose option 2 to start a wipe or shred.
+5. Option 6 can estimate total time required.
+6. Monitor progress (option 3) or review logs afterward.
 
-This program comes with **ABSOLUTELY NO WARRANTY.**
+---
+
+## 🔒 Forensic Integrity Notes
+
+- Uses `dd` and `shred` for low-level writes.
+- Supports random fill and zero fill operations.
+- Automatically appends completion timestamps and results.
+- Maintains a chain-of-evidence log for operational assurance.
+
+---
+
+© 2025 James Wintermute  
+Released under GNU GPLv3 — https://www.gnu.org/licenses/gpl-3.0.html
