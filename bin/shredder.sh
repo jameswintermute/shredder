@@ -5,9 +5,10 @@
 # This program comes with ABSOLUTELY NO WARRANTY.
 #
 # Main menu and orchestration
-# v1.0.1 — 2025-11-11
+# v1.0.3 — 2025-11-11
 
 BASE_DIR="/volume1/shredder"
+BIN_DIR="$BASE_DIR/bin"
 LOG_DIR="$BASE_DIR/logs"
 STATE_DIR="$BASE_DIR/state"
 mkdir -p "$LOG_DIR" "$STATE_DIR"
@@ -32,7 +33,7 @@ safe_device() {
 
 current_running() { [ -f "$STATE_DIR/current.pid" ] && ps | grep -q "$(cat "$STATE_DIR/current.pid")"; }
 
-get_size_bytes() { 
+get_size_bytes() {
     dev="$1"
     if command -v blockdev >/dev/null 2>&1; then
         blockdev --getsize64 "$dev" 2>/dev/null && return
@@ -46,13 +47,26 @@ get_size_bytes() {
     echo 0
 }
 
-action_list_disks() { 
+bytes_to_human() {
+    b="$1"
+    if [ "$b" -ge 1099511627776 ]; then
+        echo "$((b / 1099511627776)) TiB"
+    elif [ "$b" -ge 1073741824 ]; then
+        echo "$((b / 1073741824)) GiB"
+    elif [ "$b" -ge 1048576 ]; then
+        echo "$((b / 1048576)) MiB"
+    else
+        echo "$b bytes"
+    fi
+}
+
+action_list_disks() {
     echo "Detected USB mounts:"
     list_usb_mounts | nl -w2 -s'. '
     [ "$(list_usb_mounts | wc -l)" -eq 0 ] && echo "No USB disks mounted."
 }
 
-run_full_device_shred() { 
+run_full_device_shred() {
     whole_dev="$1"
     log="$2"
     passes="$3"
@@ -111,7 +125,7 @@ action_start_shred() {
     printf "Choose number: "
     read choice
 
-    sel="$(echo "$mounts" | sed -n "{choice}p")"
+    sel="$(echo "$mounts" | sed -n "${choice}p")"
     dev="$(echo "$sel" | awk '{print $1}')"
     mnt="$(echo "$sel" | awk '{print $2}')"
 
@@ -125,13 +139,7 @@ action_start_shred() {
     echo
     echo "Choose shred mode:"
     echo "1) Filesystem-preserving wipe (default)"
-    echo "   - Deletes files and fills free space"
-    echo "   - Keeps partition table and filesystem"
-    echo "   - Best for rotating backup disks"
     echo "2) FULL device shred (forensic)"
-    echo "   - Overwrites the whole disk /dev/sdX"
-    echo "   - Destroys partition table"
-    echo "   - Requires re-partitioning afterwards"
     printf "Mode [1]: "
     read mode
     [ -z "$mode" ] && mode=1
@@ -220,14 +228,81 @@ action_check_deps() {
     fi
 }
 
+action_estimate() {
+    echo "Select a USB mount to estimate:"
+    mounts="$(list_usb_mounts)"
+    if [ -z "$mounts" ]; then
+        echo "No USB disks mounted under /volumeUSB — plug one in first."
+        return
+    fi
+
+    i=1
+    echo "$mounts" | while read dev mnt; do
+        echo "$i) $dev -> $mnt"
+        i=$((i+1))
+    done
+
+    printf "Choose number: "
+    read choice
+
+    sel="$(echo "$mounts" | sed -n "${choice}p")"
+    dev="$(echo "$sel" | awk '{print $1}')"
+    mnt="$(echo "$sel" | awk '{print $2}')"
+
+    if [ -z "$dev" ]; then
+        echo "Invalid choice."
+        return
+    fi
+
+    whole_dev="$(device_from_mount "$dev")"
+    size_bytes=$(get_size_bytes "$whole_dev")
+    size_human=$(bytes_to_human "$size_bytes")
+
+    echo
+    echo "Disk: $whole_dev (approx $size_human)"
+    echo "Running live 60s speed test on: $mnt"
+    if [ -x "$BIN_DIR/estimate.sh" ]; then
+        rate_mb=$(sh "$BIN_DIR/estimate.sh" "$mnt")
+    else
+        echo "estimate.sh not found — falling back to 120MB/s"
+        rate_mb=120
+    fi
+
+    [ -z "$rate_mb" ] && rate_mb=120
+    if [ "$rate_mb" -le 0 ] 2>/dev/null; then
+        rate_mb=120
+    fi
+
+    echo "Measured/assumed rate: ${rate_mb} MB/s"
+
+    total_bytes=$((size_bytes * 3))
+    rate_bytes=$((rate_mb * 1024 * 1024))
+    if [ "$rate_bytes" -le 0 ]; then
+        echo "Cannot calculate estimate (rate 0)."
+        return
+    fi
+    seconds=$((total_bytes / rate_bytes))
+    hours=$((seconds / 3600))
+    rem=$((seconds % 3600))
+    mins=$((rem / 60))
+
+    echo "Estimated shred time (2-pass + zero): ~ ${hours}h ${mins}m"
+
+    low=$((hours - 2))
+    high=$((hours + 2))
+    if [ $low -lt 1 ]; then low=1; fi
+    echo "Planning window: between ${low}h and ${high}h"
+}
+
 while :; do
     echo
-    echo "=== Shredder v1.0.1 — 2025-11-11 ==="
+    echo "=== Shredder v1.0.3 — 2025-11-11 ==="
     echo "1) Check external USB disks"
     echo "2) Start a new wipe/shred"
     echo "3) Check current progress"
     echo "4) Show history"
     echo "5) Check dependencies"
+    echo "6) Shred estimate — calculate approx. time"
     echo "0) Exit"
     printf "Choose: "
     read opt
@@ -237,6 +312,7 @@ while :; do
         3) action_progress; pause ;;
         4) action_history; pause ;;
         5) action_check_deps; pause ;;
+        6) action_estimate; pause ;;
         0) exit 0 ;;
         *) echo "Unknown option" ;;
     esac
