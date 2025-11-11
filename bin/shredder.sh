@@ -5,6 +5,7 @@
 # This program comes with ABSOLUTELY NO WARRANTY.
 #
 # Main menu and orchestration
+# v1.0.1 — 2025-11-11
 
 BASE_DIR="/volume1/shredder"
 LOG_DIR="$BASE_DIR/logs"
@@ -12,41 +13,26 @@ STATE_DIR="$BASE_DIR/state"
 mkdir -p "$LOG_DIR" "$STATE_DIR"
 
 HISTORY_FILE="$LOG_DIR/history.csv"
-[ -f "$HISTORY_FILE" ] || echo "timestamp,device,passes,result,bytes,start_ts,end_ts,logfile" > "$HISTORY_FILE"
+[ -f "$HISTORY_FILE" ] || echo "timestamp,device,mode,passes,result,bytes,start_ts,end_ts,logfile" > "$HISTORY_FILE"
 
-now_iso() {
-    date -Iseconds
-}
+now_iso() { date -Iseconds; }
 
-pause() {
-    printf "Press Enter to continue... "
-    read _x
-}
+pause() { printf "Press Enter to continue... "; read _x; }
 
-list_usb_mounts() {
-    mount | grep '/volumeUSB' | awk '{print $1" "$3}'
-}
+list_usb_mounts() { mount | grep '/volumeUSB' | awk '{print $1" "$3}'; }
 
-device_from_mount() {
-    dev="$1"
-    base="$(echo "$dev" | sed 's/[0-9]*$//')"
-    echo "$base"
-}
+device_from_mount() { dev="$1"; base="$(echo "$dev" | sed 's/[0-9]*$//')"; echo "$base"; }
 
 safe_device() {
     case "$1" in
-        /dev/sda*|/dev/sdb*|/dev/md*|/dev/vda*)
-            return 1
-            ;;
+        /dev/sda*|/dev/sdb*|/dev/md*|/dev/vda*) return 1 ;;
     esac
     return 0
 }
 
-current_running() {
-    [ -f "$STATE_DIR/current.pid" ] && ps | grep -q "$(cat "$STATE_DIR/current.pid")"
-}
+current_running() { [ -f "$STATE_DIR/current.pid" ] && ps | grep -q "$(cat "$STATE_DIR/current.pid")"; }
 
-get_size_bytes() {
+get_size_bytes() { 
     dev="$1"
     if command -v blockdev >/dev/null 2>&1; then
         blockdev --getsize64 "$dev" 2>/dev/null && return
@@ -60,10 +46,46 @@ get_size_bytes() {
     echo 0
 }
 
-action_list_disks() {
+action_list_disks() { 
     echo "Detected USB mounts:"
     list_usb_mounts | nl -w2 -s'. '
     [ "$(list_usb_mounts | wc -l)" -eq 0 ] && echo "No USB disks mounted."
+}
+
+run_full_device_shred() { 
+    whole_dev="$1"
+    log="$2"
+    passes="$3"
+    size_bytes="$4"
+    start_ts=$(date +%s)
+    echo "[$(now_iso)] starting FULL DEVICE shred on $whole_dev passes=$passes" >>"$log"
+    shred -v -n "$passes" -z "$whole_dev" >>"$log" 2>&1
+    rc=$?
+    end_ts=$(date +%s)
+    result="success"
+    [ $rc -ne 0 ] && result="error-$rc"
+    echo "[$(now_iso)] finished full device shred rc=$rc" >>"$log"
+    echo "$(now_iso),$whole_dev,full-device,$passes,$result,$size_bytes,$start_ts,$end_ts,$log" >>"$HISTORY_FILE"
+}
+
+run_fs_wipe() {
+    mnt="$1"
+    log="$2"
+    start_ts=$(date +%s)
+    echo "[$(now_iso)] starting FILESYSTEM WIPE on $mnt (preserve partition)" >>"$log"
+    ( cd "$mnt" 2>/dev/null && rm -rf ./* ./.??* 2>/dev/null ) || echo "[$(now_iso)] warn: could not fully clear $mnt" >>"$log"
+    dd if=/dev/urandom of="$mnt/.shredder-fill-rand" bs=1M 2>>"$log" || true
+    sync
+    rm -f "$mnt/.shredder-fill-rand"
+    dd if=/dev/zero of="$mnt/.shredder-fill-zero" bs=1M 2>>"$log" || true
+    sync
+    rm -f "$mnt/.shredder-fill-zero"
+    rc=$?
+    end_ts=$(date +%s)
+    result="success"
+    [ $rc -ne 0 ] && result="error-$rc"
+    echo "[$(now_iso)] finished filesystem wipe rc=$rc" >>"$log"
+    echo "$(now_iso),$mnt,fs-wipe,0,$result,0,$start_ts,$end_ts,$log" >>"$HISTORY_FILE"
 }
 
 action_start_shred() {
@@ -89,7 +111,7 @@ action_start_shred() {
     printf "Choose number: "
     read choice
 
-    sel="$(echo "$mounts" | sed -n "${choice}p")"
+    sel="$(echo "$mounts" | sed -n "{choice}p")"
     dev="$(echo "$sel" | awk '{print $1}')"
     mnt="$(echo "$sel" | awk '{print $2}')"
 
@@ -100,68 +122,81 @@ action_start_shred() {
 
     whole_dev="$(device_from_mount "$dev")"
 
-    if ! safe_device "$whole_dev"; then
-        echo "Refusing to shred $whole_dev — looks like a system disk."
-        return
+    echo
+    echo "Choose shred mode:"
+    echo "1) Filesystem-preserving wipe (default)"
+    echo "   - Deletes files and fills free space"
+    echo "   - Keeps partition table and filesystem"
+    echo "   - Best for rotating backup disks"
+    echo "2) FULL device shred (forensic)"
+    echo "   - Overwrites the whole disk /dev/sdX"
+    echo "   - Destroys partition table"
+    echo "   - Requires re-partitioning afterwards"
+    printf "Mode [1]: "
+    read mode
+    [ -z "$mode" ] && mode=1
+
+    if [ "$mode" -eq 2 ] 2>/dev/null; then
+        if ! safe_device "$whole_dev"; then
+            echo "Refusing to shred $whole_dev — looks like a system disk."
+            return
+        fi
+        printf "Pass count [default 2]: "
+        read pc
+        [ -z "$pc" ] && pc=2
+        echo "About to shred WHOLE DEVICE $whole_dev with $pc pass(es) + final zero."
+        printf "Type YES to continue: "
+        read conf
+        [ "$conf" != "YES" ] && { echo "Aborted."; return; }
+        echo "Unmounting $mnt ..."
+        umount "$mnt" 2>/dev/null || echo "warn: could not unmount $mnt — shred may fail if mounted."
+        ts=$(date +%Y%m%d-%H%M%S)
+        log="$LOG_DIR/shred-${ts}-$(basename "$whole_dev").log"
+        echo "$whole_dev" > "$STATE_DIR/current.dev"
+        echo "$log" > "$STATE_DIR/current.log"
+        size_bytes=$(get_size_bytes "$whole_dev")
+        (
+            run_full_device_shred "$whole_dev" "$log" "$pc" "$size_bytes"
+            rm -f "$STATE_DIR/current.pid" "$STATE_DIR/current.dev" "$STATE_DIR/current.log"
+        ) &
+        pid=$!
+        echo $pid > "$STATE_DIR/current.pid"
+        echo "Full-device shred started in background, PID $pid"
+        echo "Log: $log"
+    else
+        echo "About to perform FILESYSTEM WIPE on $mnt (non-destructive to partition table)."
+        printf "Type YES to continue: "
+        read conf2
+        [ "$conf2" != "YES" ] && { echo "Aborted."; return; }
+        ts=$(date +%Y%m%d-%H%M%S)
+        log="$LOG_DIR/fswipe-${ts}-$(basename "$dev").log"
+        echo "$dev" > "$STATE_DIR/current.dev"
+        echo "$log" > "$STATE_DIR/current.log"
+        (
+            run_fs_wipe "$mnt" "$log"
+            rm -f "$STATE_DIR/current.pid" "$STATE_DIR/current.dev" "$STATE_DIR/current.log"
+        ) &
+        pid=$!
+        echo $pid > "$STATE_DIR/current.pid"
+        echo "Filesystem wipe started in background, PID $pid"
+        echo "Log: $log"
     fi
-
-    printf "Pass count [default 2]: "
-    read pc
-    [ -z "$pc" ] && pc=2
-
-    echo "About to shred $whole_dev (mounted at $mnt) with $pc pass(es) + final zero."
-    echo "This will destroy ALL data and partition info on that disk."
-    printf "Type YES to continue: "
-    read conf
-    [ "$conf" != "YES" ] && { echo "Aborted."; return; }
-
-    echo "Unmounting $mnt ..."
-    umount "$mnt" 2>/dev/null || echo "warn: could not unmount $mnt — shred may fail if mounted."
-
-    ts=$(date +%Y%m%d-%H%M%S)
-    log="$LOG_DIR/shred-${ts}-$(basename "$whole_dev").log"
-
-    echo "$whole_dev" > "$STATE_DIR/current.dev"
-    echo "$log" > "$STATE_DIR/current.log"
-
-    size_bytes=$(get_size_bytes "$whole_dev")
-
-    (
-        start_ts=$(date +%s)
-        echo "[$(now_iso)] starting shred on $whole_dev passes=$pc" >>"$log"
-        shred -v -n "$pc" -z "$whole_dev" >>"$log" 2>&1
-        rc=$?
-        end_ts=$(date +%s)
-        result="success"
-        [ $rc -ne 0 ] && result="error-$rc"
-        echo "[$(now_iso)] finished shred rc=$rc" >>"$log"
-        echo "$(now_iso),$whole_dev,$pc,$result,$size_bytes,$start_ts,$end_ts,$log" >>"$HISTORY_FILE"
-        rm -f "$STATE_DIR/current.pid" "$STATE_DIR/current.dev" "$STATE_DIR/current.log"
-    ) &
-
-    pid=$!
-    echo $pid > "$STATE_DIR/current.pid"
-    echo "Shred started in background, PID $pid"
-    echo "Log: $log"
 }
 
 action_progress() {
     if ! current_running; then
         echo "No shred currently running."
-        lastlog="$(ls -1t "$LOG_DIR"/shred-*.log 2>/dev/null | head -n1)"
+        lastlog="$(ls -1t "$LOG_DIR"/*.log 2>/dev/null | head -n1)"
         [ -n "$lastlog" ] && { echo "Last log:"; tail -n 20 "$lastlog"; }
         return
     fi
-
     log="$(cat "$STATE_DIR/current.log" 2>/dev/null)"
     dev="$(cat "$STATE_DIR/current.dev" 2>/dev/null)"
-    echo "Current shred on $dev"
+    echo "Current operation on $dev"
     echo "Log: $log"
-
     if [ -f "$log" ]; then
         pct="$(grep -o '[0-9][0-9]*%$' "$log" | tail -n1)"
-        echo "Progress: ${pct:-unknown}"
-        echo "Last 20 lines:"
+        [ -n "$pct" ] && echo "Progress: $pct"
         tail -n 20 "$log"
     else
         echo "Log not found."
@@ -187,11 +222,11 @@ action_check_deps() {
 
 while :; do
     echo
-    echo "=== Shredder ==="
+    echo "=== Shredder v1.0.1 — 2025-11-11 ==="
     echo "1) Check external USB disks"
-    echo "2) Start a new shred (default 2 passes)"
-    echo "3) Check current shred progress"
-    echo "4) Show shred history"
+    echo "2) Start a new wipe/shred"
+    echo "3) Check current progress"
+    echo "4) Show history"
     echo "5) Check dependencies"
     echo "0) Exit"
     printf "Choose: "
